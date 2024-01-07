@@ -72,10 +72,12 @@ static int gettok() {
 }
 
 int main() { 
+
+	std::cout << "Enter Syntax: \n" << std::endl;
 	while (true) {
 		int tokenNum = gettok();
-		std::cout << "Got: " << tokenNum << std::endl;
-	} 
-	// Does not output the EOF token
+		std::cout << "Got: " << tokenNum << std::endl; 
+		if (tokenNum == EOF) break;
+	}
 }
 
