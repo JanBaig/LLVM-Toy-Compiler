@@ -1,8 +1,9 @@
 
 #include <string>
 #include <iostream>
+#include <vector>
 
-// Scanner Code 
+// Scanner Code
 
 enum Token {
 	tok_eof = -1,
@@ -71,13 +72,72 @@ static int gettok() {
 	return ThisChar;
 }
 
+// Parser Code
+
+class ExprAST {
+public: 
+	virtual ~ExprAST() = default;
+}; 
+
+class NumberExprAST : public ExprAST {
+	double val;
+public:
+	NumberExprAST(double val) : val(val) {}
+};
+
+class VariableExprAST : public ExprAST {
+	std::string Name;
+public: 
+	// Constant reference - 1) don't change value 2) don't make a copy of argument 
+	VariableExprAST(const std::string& Name) : Name(Name) {}
+};
+
+class BinaryExprAST : public ExprAST {
+	char op;
+	std::unique_ptr<ExprAST> LHS, RHS;
+public:
+	BinaryExprAST(char op, std::unique_ptr<ExprAST> LHS, std::unique_ptr<ExprAST> RHS) :
+		op(op), LHS(std::move(LHS)), RHS(std::move(RHS)) {};
+};
+
+class CallExprAST : public ExprAST {
+	std::string Callee;
+	std::vector<std::unique_ptr<ExprAST>> Args;
+public:
+	CallExprAST(const std::string Callee, std::vector<std::unique_ptr<ExprAST>> Args) :
+		Callee(Callee), Args(std::move(Args)) {};
+}; 
+
+class PrototypeAST {
+	std::string Name;
+	std::vector<std::string> Args; // implicit argument number 
+public: 
+	PrototypeAST(const std::string& Name, std::vector<std::string> Args) :
+		Name(Name), Args(std::move(Args)) {}; 
+
+	// Why repeat const here?
+	const std::string& getName() const { return Name; }
+};
+
+class FunctionAST {
+	std::unique_ptr<PrototypeAST> proto;
+	std::unique_ptr<ExprAST> body;
+public:
+	FunctionAST(std::unique_ptr<PrototypeAST> proto, std::unique_ptr<ExprAST> body) :
+		proto(std::move(proto)), body(std::move(body)) {};
+};
+
 int main() { 
 
 	std::cout << "Enter Syntax: \n" << std::endl;
 	while (true) {
 		int tokenNum = gettok();
 		std::cout << "Got: " << tokenNum << std::endl; 
-		if (tokenNum == EOF) break;
+
+		// When Ctrl-Z + Enter is hit
+		if (tokenNum == EOF) break; 
 	}
 }
+
+// Learn about move semantics & (r/l)values 
 
