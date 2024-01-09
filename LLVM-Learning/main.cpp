@@ -2,6 +2,7 @@
 #include <string>
 #include <iostream>
 #include <vector>
+#include <map>
 
 // Scanner Code
 
@@ -148,6 +149,17 @@ std::unique_ptr<PrototypeAST> LogErrorP(const char* str) {
 
 // Parser Functions
 
+static std::map<char, int> opPrecendence;
+
+static int getTokPrecedence() {
+	// If token is not a binary operator
+	if (!isascii(currTok)) return -1;
+
+	int tokPrec = opPrecendence[currTok];
+	if (tokPrec <= 0) return -1;
+	return tokPrec;
+}
+
 static std::unique_ptr<ExprAST> ParseNumberExpr() {
 	auto Result = std::make_unique<NumberExprAST>(NumVal);
 	getNextToken(); // consume current, advances lexer to next token
@@ -201,11 +213,47 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
 	}
 }
 
+static std::unique_ptr<ExprAST> ParseExpression() {
+	auto LHS = ParseExpression();
+	if (!LHS) return nullptr;
+	return ParseOpRHS(0, std::move(LHS));
+} 
+
+static std::unique_ptr<ExprAST> ParseOpRHS(int exprPrec, std::unique_ptr<ExprAST> LHS) {
+	
+	// If valid binary operator, find its precedence
+	while (true) {
+		int tokPrec = getTokPrecedence();
+
+		// If the operator has a lower precedence than what was parsed in LHS, ignroe for now 
+		if (tokPrec < exprPrec) return LHS;
+
+		int binOp = currTok; // store the operator
+		getNextToken(); // consume the operator, advance
+		
+		auto RHS = ParsePrimary();
+		if (!RHS) return nullptr;
+			
+		int nextPrec = getTokPrecedence();
+		if (tokPrec < nextPrec) {
+			RHS = ParseOpRHS(tokPrec + 1, std::move(RHS));
+			if (!RHS) return nullptr;
+		} 
+
+		// Merge LHS/RHS 
+		LHS = std::make_unique<BinaryExprAST>(binOp, std::move(LHS), std::move(RHS));
+	}
+}
 
 int main() { 
 
-	std::cout << "Enter Syntax: \n" << std::endl; 
+	// Defining Precedence
+	opPrecendence['<'] = 10;
+	opPrecendence['+'] = 20;
+	opPrecendence['-'] = 20;
+	opPrecendence['*'] = 40;
 
+	std::cout << "Enter Syntax: \n" << std::endl; 
 	while (true) {
 		int tokenNum = gettok();
 		std::cout << "Got: " << tokenNum << std::endl; 
