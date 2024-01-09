@@ -72,7 +72,7 @@ static int gettok() {
 	return ThisChar;
 }
 
-// Parser Code
+// AST Classes
 
 class ExprAST {
 public: 
@@ -110,12 +110,14 @@ public:
 
 class PrototypeAST {
 	std::string Name;
-	std::vector<std::string> Args; // implicit argument number 
+	std::vector<std::string> Args;
 public: 
+	// Type of arguments doesn't need to be stored anywhere since they are all 
+	// the same type in kaleidoscope - doubles FP values (the only values that exists)
+	// Therefore, vec of strings just stores the name of the args -> Double <name> ...
 	PrototypeAST(const std::string& Name, std::vector<std::string> Args) :
 		Name(Name), Args(std::move(Args)) {}; 
 
-	// Why repeat const here?
 	const std::string& getName() const { return Name; }
 };
 
@@ -127,17 +129,90 @@ public:
 		proto(std::move(proto)), body(std::move(body)) {};
 };
 
+// Parser 
+
+// Parser Helpers
+
+static int currTok;
+static int getNextToken() { return currTok = gettok(); }
+
+std::unique_ptr<ExprAST> LogError(const char* str) {
+	fprintf(stderr, "Error: %s\n", str);
+	return nullptr;
+}
+
+std::unique_ptr<PrototypeAST> LogErrorP(const char* str) {
+	LogError(str);
+	return nullptr;
+}
+
+// Parser Functions
+
+static std::unique_ptr<ExprAST> ParseNumberExpr() {
+	auto Result = std::make_unique<NumberExprAST>(NumVal);
+	getNextToken(); // consume current, advances lexer to next token
+	return std::move(Result);
+}
+
+static std::unique_ptr<ExprAST> ParseParenExpr() {
+	getNextToken(); // consume '(' 
+	
+	auto V = ParseExpresion();
+	
+	if (!V) return nullptr; 
+	if (currTok != ')') return LogError("expected ')'");
+
+	getNextToken(); // consume ')', advance lexer currTok
+	return V;
+}
+
+static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
+	std::string idName = IdentifierStr; 
+	getNextToken();  // consume identifier, advance currTok 
+
+	// Just a variable reference
+	if (currTok != '(') return std::make_unique<VariableExprAST>(idName);
+
+	// Possible function call
+	getNextToken(); // consume '('
+	std::vector<std::unique_ptr<ExprAST>> Args; 
+	if (currTok != ')') {
+		while (true) {
+			// If no errors found when parsing the current arg
+			if (auto Arg = ParseExpression()) Args.push_back(std::move(Arg));
+			else return nullptr;
+			
+			if (currTok == ')') break;
+			if (currTok != ',') return LogError("Expected ')' or ',' in the argument list");
+			getNextToken(); // consume ',', advance
+		}
+	}
+
+	getNextToken(); // consume ')', advance
+	return std::make_unique<CallExprAST>(idName, std::move(Args));
+}
+
+static std::unique_ptr<ExprAST> ParsePrimary() { 
+	switch (currTok) {
+		default: return LogError("unknown token when expecting an expression");
+		case tok_identifier: return ParseIdentifierExpr();
+		case tok_number: return ParseNumberExpr();
+		case '(': return ParseParenExpr();
+	}
+}
+
+
 int main() { 
 
-	std::cout << "Enter Syntax: \n" << std::endl;
+	std::cout << "Enter Syntax: \n" << std::endl; 
+
 	while (true) {
 		int tokenNum = gettok();
 		std::cout << "Got: " << tokenNum << std::endl; 
 
 		// When Ctrl-Z + Enter is hit
 		if (tokenNum == EOF) break; 
-	}
+	} 
 }
 
-// Learn about move semantics & (r/l)values 
 

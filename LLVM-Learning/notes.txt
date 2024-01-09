@@ -1,0 +1,8 @@
+
+NOTES 
+
+- move sementivs, const references, lvalue and rvalues and all that jazz needs to be reviewed 
+- trace the recursive decent parser and also how the lexer uses lookahead to determine next token	
+
+
+
