@@ -311,7 +311,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
         return LogErrorP("Expected function name in prototype");
 
     std::string FnName = IdentifierStr;
-    getNextToken();
+    getNextToken(); // consume identifier
 
     if (CurTok != '(')
         return LogErrorP("Expected '(' in prototype");
@@ -322,13 +322,13 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     if (CurTok != ')')
         return LogErrorP("Expected ')' in prototype");
 
-    getNextToken();
+    getNextToken(); // consume ')'
 
     return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
 }
 
 static std::unique_ptr<FunctionAST> ParseDefinition() {
-    getNextToken(); 
+    getNextToken(); // consume 'def'
     auto Proto = ParsePrototype();
     if (!Proto)
         return nullptr;
@@ -340,7 +340,7 @@ static std::unique_ptr<FunctionAST> ParseDefinition() {
 
 static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
     if (auto E = ParseExpression()) {
-        // Make an anonymous proto.
+        // Make an anonymous proto (no args)
         auto Proto = std::make_unique<PrototypeAST>("__anon_expr",
             std::vector<std::string>());
         return std::make_unique<FunctionAST>(std::move(Proto), std::move(E));
@@ -349,7 +349,7 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 }
 
 static std::unique_ptr<PrototypeAST> ParseExtern() {
-    getNextToken(); // eat extern.
+    getNextToken(); // eat extern
     return ParsePrototype();
 }
 
@@ -362,7 +362,7 @@ static std::unique_ptr<Module> TheModule;
 static std::unique_ptr<IRBuilder<>> Builder;
 static std::map<std::string, Value*> NamedValues;
 
-Value* LogErmmrorV(const char* Str) {
+Value* LogErrorV(const char* Str) {
     LogError(Str);
     return nullptr;
 }
@@ -394,6 +394,7 @@ Value* BinaryExprAST::codegen() {
         return Builder->CreateFMul(L, R, "multmp");
     case '<':
         L = Builder->CreateFCmpULT(L, R, "cmptmp");
+        // Convert bool 0/1 to double 0.0 or 1.0
         return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext), "booltmp");
     default:
         return LogErrorV("invalid binary operator");
@@ -419,44 +420,67 @@ Value* CallExprAST::codegen() {
 }
 
 Function* PrototypeAST::codegen() {
+    // Create a vector of Type pointers for function arguments, all of type double
     std::vector<Type*> Doubles(Args.size(), Type::getDoubleTy(*TheContext));
-    FunctionType* FT =
+    
+    // Create a FunctionType representing a function returning double and taking
+    // arguments of double types based on the vector created above
+    FunctionType* FT = 
         FunctionType::get(Type::getDoubleTy(*TheContext), Doubles, false);
 
+    // Create a new Function instance with ExternalLinkage, the given name, and
+    // associated with the current module (TheModule)
+    // Implicitly generated IR for function args
     Function* F =
         Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
 
+    // Set names for function arguments based on the names provided in the Args vector
     unsigned Idx = 0;
     for (auto& Arg : F->args())
         Arg.setName(Args[Idx++]);
 
+    // Return the generated LLVM function instance
     return F;
 }
 
 Function* FunctionAST::codegen() {
+    // Try to get the existing function from the module
     Function* TheFunction = TheModule->getFunction(Proto->getName());
 
+    // If the function DNE, generate its prototype
     if (!TheFunction)
         TheFunction = Proto->codegen();
 
+    // If the prototype cannot be generated, return a nullptr
     if (!TheFunction)
         return nullptr;
 
+    // Create a basic block named 'entity' in the function
     BasicBlock* BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
+    
+    // Set the insertion point for the IRBuilder to the new basic block 'entity'
     Builder->SetInsertPoint(BB);
 
+    // Clear the map of NamedValues in the current scope - ?
     NamedValues.clear();
+
+    // Map function arguments to their names in the named values map
     for (auto& Arg : TheFunction->args())
         NamedValues[std::string(Arg.getName())] = &Arg;
 
+    // Generate code for the body of the function
     if (Value* RetVal = Body->codegen()) {
+        // If the body code generation is successful, create a return instruction
         Builder->CreateRet(RetVal);
 
+        // Verify the function to ensure it is well-formed
         verifyFunction(*TheFunction);
 
+        // Return the generated function
         return TheFunction;
     }
 
+    // If the body code generation is unsuccessful, erase the function and return nullptr
     TheFunction->eraseFromParent();
     return nullptr;
 }
