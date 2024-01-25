@@ -1,4 +1,5 @@
 
+#include "/usr/share/doc/llvm-14-examples/examples/Kaleidoscope/include/KaleidoscopeJIT.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -7,12 +8,19 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
-
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
 #include <algorithm>
+#include <cassert>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -21,6 +29,7 @@
 #include <vector>
 
 using namespace llvm;
+using namespace llvm::orc;
 
 //===----------------------------------------------------------------------===//
 // Lexer
@@ -361,6 +370,10 @@ static std::unique_ptr<LLVMContext> TheContext;
 static std::unique_ptr<Module> TheModule;
 static std::unique_ptr<IRBuilder<>> Builder;
 static std::map<std::string, Value*> NamedValues;
+static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
+static ExitOnError ExitOnErr;
 
 Value* LogErrorV(const char* Str) {
     LogError(Str);
@@ -368,9 +381,12 @@ Value* LogErrorV(const char* Str) {
 }
 
 Value* NumberExprAST::codegen() {
+    // We use get:: to avoid having different variables point to identical valued constants
+    // More memory efficient to have a single variable and reuse that
     return ConstantFP::get(*TheContext, APFloat(Val));
 }
 
+// Variable Reference
 Value* VariableExprAST::codegen() {
     // Look this variable up in the function.
     Value* V = NamedValues[Name];
@@ -400,15 +416,19 @@ Value* BinaryExprAST::codegen() {
         return LogErrorV("invalid binary operator");
     }
 }
-
+  
 Value* CallExprAST::codegen() {
+    // Look up the name in the Module's symbol table
     Function* CalleeF = TheModule->getFunction(Callee);
     if (!CalleeF)
         return LogErrorV("Unknown function referenced");
 
+    // CalleeF os the callee's function definition
+    // The Args refer to the the arguments passed in when a call to CalleeF is made
     if (CalleeF->arg_size() != Args.size())
         return LogErrorV("Incorrect # arguments passed");
 
+    // Codegen'ing call arguments
     std::vector<Value*> ArgsV;
     for (unsigned i = 0, e = Args.size(); i != e; ++i) {
         ArgsV.push_back(Args[i]->codegen());
@@ -419,6 +439,7 @@ Value* CallExprAST::codegen() {
     return Builder->CreateCall(CalleeF, ArgsV, "calltmp");
 }
 
+// Declare Function Signature
 Function* PrototypeAST::codegen() {
     // Create a vector of Type pointers for function arguments, all of type double
     std::vector<Type*> Doubles(Args.size(), Type::getDoubleTy(*TheContext));
@@ -431,15 +452,18 @@ Function* PrototypeAST::codegen() {
     // Create a new Function instance with ExternalLinkage, the given name, and
     // associated with the current module (TheModule)
     // Implicitly generated IR for function args
+    // .get() retrives the raw pointer from TheModule to pass into the function
+    // The name is registered in TheModule's symbol tables
     Function* F =
         Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
 
-    // Set names for function arguments based on the names provided in the Args vector
+    // Set names (parameter names) for function arguments based on the names provided in the Args vector
     unsigned Idx = 0;
     for (auto& Arg : F->args())
         Arg.setName(Args[Idx++]);
 
     // Return the generated LLVM function instance
+    // Function signitures in LLVM = functions without bodies
     return F;
 }
 
@@ -461,10 +485,12 @@ Function* FunctionAST::codegen() {
     // Set the insertion point for the IRBuilder to the new basic block 'entity'
     Builder->SetInsertPoint(BB);
 
-    // Clear the map of NamedValues in the current scope - ?
+    // Clear the map of NamedValues in the current scope
     NamedValues.clear();
 
     // Map function arguments to their names in the named values map
+    // Allowing parameters in the signiture to be visable in the function body
+    // &Arg will be set when this function is called
     for (auto& Arg : TheFunction->args())
         NamedValues[std::string(Arg.getName())] = &Arg;
 
@@ -476,11 +502,15 @@ Function* FunctionAST::codegen() {
         // Verify the function to ensure it is well-formed
         verifyFunction(*TheFunction);
 
+        // Optimize the function
+        TheFPM->run(*TheFunction);
+
         // Return the generated function
         return TheFunction;
     }
 
     // If the body code generation is unsuccessful, erase the function and return nullptr
+    // If we didn’t delete it, it would live in the symbol table, with a body, preventing future redefinition.
     TheFunction->eraseFromParent();
     return nullptr;
 }
@@ -489,11 +519,28 @@ Function* FunctionAST::codegen() {
 // Top-Level parsing and JIT Driver
 //===----------------------------------------------------------------------===//
 
-static void InitializeModule() {
+static void InitializeModuleAndPassManager() {
+    // Open a new context and module.
     TheContext = std::make_unique<LLVMContext>();
     TheModule = std::make_unique<Module>("my cool jit", *TheContext);
+    TheModule->setDataLayout(TheJIT->getDataLayout());
 
+    // Create a new builder for the module.
     Builder = std::make_unique<IRBuilder<>>(*TheContext);
+
+    // Create a new pass manager attached to it.
+    TheFPM = std::make_unique<legacy::FunctionPassManager>(TheModule.get());
+
+    // Do simple "peephole" optimizations and bit-twiddling optzns.
+    TheFPM->add(createInstructionCombiningPass());
+    // Reassociate expressions.
+    TheFPM->add(createReassociatePass());
+    // Eliminate Common SubExpressions.
+    TheFPM->add(createGVNPass());
+    // Simplify the control flow graph (deleting unreachable blocks, etc).
+    TheFPM->add(createCFGSimplificationPass());
+
+    TheFPM->doInitialization();
 }
 
 static void HandleDefinition() {
@@ -564,6 +611,10 @@ static void MainLoop() {
 //===----------------------------------------------------------------------===//
 
 int main() {
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
+
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 20;
@@ -572,7 +623,8 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    InitializeModule();
+    TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
+    InitializeModuleAndPassManager();
 
     MainLoop();
 
