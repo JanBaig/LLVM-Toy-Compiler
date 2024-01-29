@@ -375,6 +375,20 @@ static std::unique_ptr<KaleidoscopeJIT> TheJIT;
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 static ExitOnError ExitOnErr;
 
+Function* getFunction(std::string Name) {
+    
+    // First check if the function has already been added to the current module
+    if (auto* F = TheModule->getFunction(Name)) return F;
+
+    // If not, check whether we can codegen the declaration from some existing prototype.
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end())
+        return FI->second->codegen();
+
+    // If no existing prototype exists, return null.
+    return nullptr;
+}
+
 Value* LogErrorV(const char* Str) {
     LogError(Str);
     return nullptr;
@@ -416,10 +430,10 @@ Value* BinaryExprAST::codegen() {
         return LogErrorV("invalid binary operator");
     }
 }
-  
+
 Value* CallExprAST::codegen() {
     // Look up the name in the Module's symbol table
-    Function* CalleeF = TheModule->getFunction(Callee);
+    Function* CalleeF = getFunction(Callee);
     if (!CalleeF)
         return LogErrorV("Unknown function referenced");
 
@@ -469,14 +483,12 @@ Function* PrototypeAST::codegen() {
 }
 
 Function* FunctionAST::codegen() {
-    // Try to get the existing function from the module
-    Function* TheFunction = TheModule->getFunction(Proto->getName());
 
-    // If the function DNE, generate its prototype
-    if (!TheFunction)
-        TheFunction = Proto->codegen();
-
-    // If the prototype cannot be generated, return a nullptr
+    // Transfer ownership of the prototype to the FunctionProtos map, but keep a
+    // reference to it for use below.
+    auto& P = *Proto;
+    FunctionProtos[Proto->getName()] = std::move(Proto);
+    Function* TheFunction = getFunction(P.getName());
     if (!TheFunction)
         return nullptr;
 
@@ -551,9 +563,13 @@ static void HandleDefinition() {
             fprintf(stderr, "Read function definition:");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            ExitOnErr(TheJIT->addModule(
+                ThreadSafeModule(std::move(TheModule), std::move(TheContext))));
+            InitializeModuleAndPassManager();
         }
     }
     else {
+        // Skip token for error recovery.
         getNextToken();
     }
 }
@@ -564,21 +580,38 @@ static void HandleExtern() {
             fprintf(stderr, "Read extern: ");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
         }
     }
     else {
+        // Skip token for error recovery.
         getNextToken();
     }
 }
 
 static void HandleTopLevelExpression() {
+    // Evaluate a top-level expression into an annonymous function
     if (auto FnAST = ParseTopLevelExpr()) {
-        if (auto* FnIR = FnAST->codegen()) {
-            fprintf(stderr, "Read top-level expression:");
-            FnIR->print(errs());
-            fprintf(stderr, "\n");
+        if (FnAST->codegen()) {
+            
+            // Create a ResourceTracker to track JIT'd memory allocated to our
+            // anonymous expression -- that way we can free it after executing.
+            auto RT = TheJIT->getMainJITDylib().createResourceTracker();
 
-            FnIR->eraseFromParent();
+            auto TSM = ThreadSafeModule(std::move(TheModule), std::move(TheContext));
+            ExitOnErr(TheJIT->addModule(std::move(TSM), RT));
+            InitializeModuleAndPassManager(); 
+            
+            // Search the JIT for the __anon_expr symbol
+            auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
+
+            // Get the symbol's address and cast it to the right type (takes no
+            // arguments, returns a double) so we can call it as a native function.
+            double (*FP)() = (double (*)())(intptr_t)ExprSymbol.getAddress();
+            fprintf(stderr, "Evaluated to %f\n", FP());
+
+            // Delete the anonymous expression module from the JIT 
+            ExitOnErr(RT->remove());
         }
     }
     else {
@@ -609,6 +642,28 @@ static void MainLoop() {
 }
 
 //===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+    fputc((char)X, stderr);
+    return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+    fprintf(stderr, "%f\n", X);
+    return 0;
+}
+
+//===----------------------------------------------------------------------===//
 // Main driver code.
 //===----------------------------------------------------------------------===//
 
@@ -626,6 +681,7 @@ int main() {
     getNextToken();
 
     TheJIT = ExitOnErr(KaleidoscopeJIT::Create());
+
     InitializeModuleAndPassManager();
 
     MainLoop();
@@ -634,6 +690,4 @@ int main() {
 
     return 0;
 }
-
-// There's a module symbol table (function names) and a namedMap (function args) symbol tabnle
 
