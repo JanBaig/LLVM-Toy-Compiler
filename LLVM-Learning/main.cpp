@@ -423,8 +423,9 @@ Value* CallExprAST::codegen() {
     if (!CalleeF)
         return LogErrorV("Unknown function referenced");
 
-    // CalleeF os the callee's function definition
+    // CalleeF is the callee's function definition
     // The Args refer to the the arguments passed in when a call to CalleeF is made
+    // Args.size() depends on user input for calling, CalleeF depends on the function definition
     if (CalleeF->arg_size() != Args.size())
         return LogErrorV("Incorrect # arguments passed");
 
@@ -463,7 +464,7 @@ Function* PrototypeAST::codegen() {
         Arg.setName(Args[Idx++]);
 
     // Return the generated LLVM function instance
-    // Function signitures in LLVM = functions without bodies
+    // Function signitures in LLVM = functions but functions without bodies
     return F;
 }
 
@@ -479,21 +480,22 @@ Function* FunctionAST::codegen() {
     if (!TheFunction)
         return nullptr;
 
-    // Create a basic block named 'entity' in the function
+    // Create a basic block named 'entry' in the function
     BasicBlock* BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
     
-    // Set the insertion point for the IRBuilder to the new basic block 'entity'
+    // Set the insertion point for the IRBuilder to the new basic block 'entry'
     Builder->SetInsertPoint(BB);
 
-    // Clear the map of NamedValues in the current scope
+    // Clear the map of NamedValues in the current scope (NamedValues could hold another function's values)
     NamedValues.clear();
 
-    // Map function arguments to their names in the named values map
-    // Allowing parameters in the signiture to be visable in the function body
-    // &Arg will be set when this function is called
+    // Adding function parameters into the NamedValues map so that they can be resolved within the function body
+    // Their value in the map is an address that comes from the LLVM function's arg list. 
+    // The LLVM function's arg list is updated with the values of the codegen'd arguments when it is called 
+    // Since we passed an address to NamedValues, the above change is reflected within the map
     for (auto& Arg : TheFunction->args())
         NamedValues[std::string(Arg.getName())] = &Arg;
-
+    
     // Generate code for the body of the function
     if (Value* RetVal = Body->codegen()) {
         // If the body code generation is successful, create a return instruction
@@ -632,4 +634,6 @@ int main() {
 
     return 0;
 }
+
+// There's a module symbol table (function names) and a namedMap (function args) symbol tabnle
 
